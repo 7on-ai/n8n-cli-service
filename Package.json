@@ -1,0 +1,24 @@
+{
+  "name": "n8n-cli-service-railway",
+  "version": "1.0.0",
+  "description": "N8N CLI Service for Railway",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "railway:build": "npm install",
+    "railway:start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "@supabase/supabase-js": "^2.38.0",
+    "n8n": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["n8n", "cli", "railway", "credentials"],
+  "author": "",
+  "license": "MIT"
+}
