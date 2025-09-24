@@ -1,20 +1,20 @@
-# ใช้ Node 18 เป็น base image
+# Use Node 18 base image
 FROM node:18
 
-# กำหนด working directory
+# Set working directory
 WORKDIR /app
 
-# copy package.json ก่อน
+# Copy package files first
 COPY package*.json ./
 
-# install dependencies
+# Install dependencies
 RUN npm install
 
-# copy source code
+# Copy all source code
 COPY . .
 
-# expose port
+# Expose port
 EXPOSE 3000
 
-# start app
+# Start app
 CMD ["npm", "start"]
