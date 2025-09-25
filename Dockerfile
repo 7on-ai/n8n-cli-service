@@ -1,5 +1,5 @@
-# Use Node 18 base image
-FROM node:18-alpine
+# Use Node 20 base image (required for n8n latest)
+FROM node:20-alpine
 
 # Install system dependencies
 RUN apk add --no-cache \
