@@ -1,4 +1,4 @@
-// Railway N8N CLI Service - Simplified Version
+// Railway N8N CLI Service - Fixed Version with Proper CLI Handling
 import express from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { exec } from 'child_process';
@@ -33,21 +33,53 @@ app.use((req, res, next) => {
   }
 });
 
-// Health check endpoint (Railway requirement)
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    service: 'n8n-cli-railway',
-    version: '1.0.0'
-  });
+// Health check endpoint with n8n CLI verification
+app.get('/', async (req, res) => {
+  try {
+    // Test n8n CLI availability
+    const { stdout } = await execAsync('n8n --version', { timeout: 5000 });
+    
+    res.json({ 
+      status: 'healthy', 
+      timestamp: new Date().toISOString(),
+      service: 'n8n-cli-railway',
+      version: '2.0.0',
+      n8n_cli_version: stdout.trim(),
+      n8n_available: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      service: 'n8n-cli-railway',
+      error: 'n8n CLI not available',
+      details: error.message,
+      n8n_available: false
+    });
+  }
 });
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString() 
-  });
+app.get('/health', async (req, res) => {
+  try {
+    // Verify n8n CLI commands are available
+    const { stdout } = await execAsync('n8n --help', { timeout: 5000 });
+    const hasImportCommand = stdout.includes('import:credentials');
+    
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      n8n_cli_available: true,
+      import_command_available: hasImportCommand
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      error: 'n8n CLI check failed',
+      details: error.message,
+      n8n_cli_available: false
+    });
+  }
 });
 
 // Main credential injection endpoint
@@ -75,6 +107,18 @@ app.post('/inject-credential', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
+    // Verify n8n CLI before proceeding
+    try {
+      await execAsync('n8n --version', { timeout: 5000 });
+    } catch (cliError) {
+      console.error('N8N CLI not available:', cliError);
+      return res.status(500).json({
+        success: false,
+        message: 'N8N CLI is not available in this environment',
+        error_type: 'cli_unavailable'
+      });
+    }
+
     // Fetch user credentials and n8n info
     const credData = await fetchUserCredentials(user_id, provider);
     if (!credData) {
@@ -88,8 +132,8 @@ app.post('/inject-credential', async (req, res) => {
     const credentialTemplate = createCredentialTemplate(credData);
     const jsonContent = generateCredentialJSON([credentialTemplate]);
 
-    // Execute n8n CLI
-    const cliResult = await executeN8NCLI(credData, jsonContent);
+    // Execute n8n CLI with enhanced error handling
+    const cliResult = await executeN8NCLIEnhanced(credData, jsonContent);
 
     // Update database status
     await updateCredentialStatus(
@@ -112,7 +156,8 @@ app.post('/inject-credential', async (req, res) => {
       return res.status(500).json({
         success: false,
         message: cliResult.message,
-        attempt: attempt
+        attempt: attempt,
+        troubleshooting: cliResult.troubleshooting
       });
     }
 
@@ -126,12 +171,150 @@ app.post('/inject-credential', async (req, res) => {
   }
 });
 
-// Fetch user credentials from Supabase
+// Enhanced n8n CLI execution with multiple strategies
+async function executeN8NCLIEnhanced(credData, jsonContent) {
+  const tempFileName = `credentials-${Date.now()}.json`;
+  const tempFilePath = path.join('/tmp', tempFileName);
+  
+  try {
+    console.log('Starting enhanced Railway n8n CLI execution');
+
+    // Write JSON file
+    await fs.writeFile(tempFilePath, jsonContent);
+
+    // Strategy 1: Try basic import command
+    try {
+      console.log('Attempting Strategy 1: Basic import command');
+      
+      const result = await tryImportCommand(tempFilePath, credData, 'basic');
+      if (result.success) {
+        await fs.unlink(tempFilePath).catch(() => {});
+        return result;
+      }
+    } catch (error) {
+      console.log('Strategy 1 failed:', error.message);
+    }
+
+    // Strategy 2: Try with explicit user folder
+    try {
+      console.log('Attempting Strategy 2: With explicit user folder');
+      
+      // Create user folder
+      await fs.mkdir('/tmp/.n8n', { recursive: true });
+      
+      const result = await tryImportCommand(tempFilePath, credData, 'userFolder');
+      if (result.success) {
+        await fs.unlink(tempFilePath).catch(() => {});
+        return result;
+      }
+    } catch (error) {
+      console.log('Strategy 2 failed:', error.message);
+    }
+
+    // Strategy 3: Try with minimal environment
+    try {
+      console.log('Attempting Strategy 3: Minimal environment');
+      
+      const result = await tryImportCommand(tempFilePath, credData, 'minimal');
+      if (result.success) {
+        await fs.unlink(tempFilePath).catch(() => {});
+        return result;
+      }
+    } catch (error) {
+      console.log('Strategy 3 failed:', error.message);
+    }
+
+    throw new Error('All import strategies failed');
+
+  } catch (error) {
+    console.error('Enhanced CLI execution error:', error);
+    await fs.unlink(tempFilePath).catch(() => {});
+    
+    return {
+      success: false,
+      message: error.message || 'Enhanced CLI execution failed',
+      troubleshooting: {
+        strategies_tried: ['basic', 'userFolder', 'minimal'],
+        common_fixes: [
+          'Rebuild Docker image with proper n8n installation',
+          'Check n8n global installation',
+          'Verify file permissions in container'
+        ]
+      }
+    };
+  }
+}
+
+// Try different import command strategies
+async function tryImportCommand(tempFilePath, credData, strategy) {
+  let command;
+  let env = { ...process.env };
+
+  switch (strategy) {
+    case 'basic':
+      command = `n8n import:credentials --input=${tempFilePath}`;
+      env.N8N_ENCRYPTION_KEY = credData.n8n_encryption_key;
+      break;
+      
+    case 'userFolder':
+      command = `n8n import:credentials --input=${tempFilePath} --userFolder=/tmp/.n8n`;
+      env.N8N_ENCRYPTION_KEY = credData.n8n_encryption_key;
+      env.N8N_USER_FOLDER = '/tmp/.n8n';
+      break;
+      
+    case 'minimal':
+      command = `n8n import:credentials --input=${tempFilePath}`;
+      env = {
+        NODE_ENV: 'production',
+        N8N_ENCRYPTION_KEY: credData.n8n_encryption_key,
+        N8N_LOG_LEVEL: 'error',
+        N8N_USER_MANAGEMENT_DISABLED: 'true'
+      };
+      break;
+      
+    default:
+      throw new Error(`Unknown strategy: ${strategy}`);
+  }
+
+  console.log(`Executing: ${command}`);
+  console.log(`Environment: N8N_ENCRYPTION_KEY=${env.N8N_ENCRYPTION_KEY ? 'set' : 'not set'}`);
+
+  const { stdout, stderr } = await execAsync(command, { 
+    env, 
+    timeout: 60000,
+    cwd: '/tmp'
+  });
+  
+  console.log(`Strategy ${strategy} output:`, stdout);
+  if (stderr) console.log(`Strategy ${strategy} stderr:`, stderr);
+
+  // Check for success indicators
+  if (stdout.includes('Successfully imported') || 
+      stdout.includes('imported') || 
+      stdout.includes('credential')) {
+    
+    const credentialId = JSON.parse(await fs.readFile(tempFilePath, 'utf8')).credentials[0].id;
+    
+    return {
+      success: true,
+      credentialId: credentialId,
+      message: `Credentials imported successfully using ${strategy} strategy`,
+      details: {
+        method: `railway_cli_${strategy}`,
+        output: stdout,
+        strategy: strategy
+      }
+    };
+  }
+
+  throw new Error(`Import command completed but no success indicators found. Output: ${stdout}`);
+}
+
+// Keep other functions unchanged
 async function fetchUserCredentials(userId, provider) {
   const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_SERVICE_KEY);
   
   try {
-    // Get social credentials
     const { data: socialCred, error: socialError } = await supabase
       .from('user_social_credentials')
       .select('*')
@@ -144,7 +327,6 @@ async function fetchUserCredentials(userId, provider) {
       return null;
     }
 
-    // Get user n8n info
     const { data: userInfo, error: userError } = await supabase
       .from('launchmvpfast-saas-starterkit_user')
       .select('n8n_url, n8n_user_email, n8n_encryption_key, email, name')
@@ -174,7 +356,6 @@ async function fetchUserCredentials(userId, provider) {
   }
 }
 
-// Create n8n credential template
 function createCredentialTemplate(credData) {
   const credentialId = crypto.randomUUID();
   const timestamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
@@ -207,7 +388,6 @@ function createCredentialTemplate(credData) {
   };
 }
 
-// Generate n8n import JSON
 function generateCredentialJSON(credentials) {
   return JSON.stringify({
     version: "1.0.0",
@@ -216,61 +396,6 @@ function generateCredentialJSON(credentials) {
   }, null, 2);
 }
 
-// Execute n8n CLI (Railway optimized)
-async function executeN8NCLI(credData, jsonContent) {
-  const tempFileName = `credentials-${Date.now()}.json`;
-  const tempFilePath = path.join('/tmp', tempFileName);
-  
-  try {
-    console.log('Starting Railway n8n CLI execution');
-
-    // Write JSON file
-    await fs.writeFile(tempFilePath, jsonContent);
-
-    // Set n8n environment
-    const env = {
-      ...process.env,
-      N8N_ENCRYPTION_KEY: credData.n8n_encryption_key,
-      N8N_USER_MANAGEMENT_DISABLED: 'false',
-      N8N_LOG_LEVEL: 'warn'
-    };
-
-    // Import credentials
-    const { stdout, stderr } = await execAsync(
-      `n8n import:credentials --input=${tempFilePath} --separate`, 
-      { env, timeout: 30000 }
-    );
-    
-    console.log('CLI output:', stdout);
-    if (stderr) console.log('CLI stderr:', stderr);
-
-    // Cleanup
-    await fs.unlink(tempFilePath).catch(() => {});
-
-    const credentialId = JSON.parse(jsonContent).credentials[0].id;
-    
-    return {
-      success: true,
-      credentialId: credentialId,
-      message: 'Credentials imported successfully via Railway',
-      details: {
-        method: 'railway_cli',
-        output: stdout
-      }
-    };
-
-  } catch (error) {
-    console.error('Railway CLI execution error:', error);
-    await fs.unlink(tempFilePath).catch(() => {});
-    
-    return {
-      success: false,
-      message: error.message || 'Railway CLI execution failed'
-    };
-  }
-}
-
-// Update database status
 async function updateCredentialStatus(userId, provider, success, credentialId, error, details) {
   const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_SERVICE_KEY);
   
@@ -279,12 +404,13 @@ async function updateCredentialStatus(userId, provider, success, credentialId, e
     injected_at: success ? new Date().toISOString() : null,
     injection_error: error || null,
     additional_data: JSON.stringify({
-      injection_method: 'railway_cli',
+      injection_method: 'railway_cli_enhanced',
       success: success,
       error: error || null,
       details: details || null,
       timestamp: new Date().toISOString(),
-      platform: 'railway'
+      platform: 'railway',
+      version: '2.0'
     }),
     updated_at: new Date().toISOString()
   };
@@ -307,7 +433,7 @@ async function updateCredentialStatus(userId, provider, success, credentialId, e
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`Railway N8N CLI Service running on port ${PORT}`);
+  console.log(`Railway N8N CLI Service v2.0 running on port ${PORT}`);
   console.log('Environment check:', {
     hasSupabaseUrl: !!CONFIG.SUPABASE_URL,
     hasSupabaseKey: !!CONFIG.SUPABASE_SERVICE_KEY,
